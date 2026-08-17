@@ -41,6 +41,7 @@ from build123d.build_constants import (
     UNITS_PER_KILOGRAM,
 )
 from .version import version as __version__
+from build123d.unfold import unfold
 
 modify_copyreg()
 

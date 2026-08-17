@@ -1266,28 +1266,14 @@ class Face(Mixin2D[TopoDS_Face]):
             return degrees(self.geom_adaptor().SemiAngle())  # type: ignore[attr-defined]
         return None
 
-    @property
-    def uv_face(self) -> Face:
-        """Create a planar face from a face's parametric-space boundary.
-
-        Each boundary edge's pcurve on ``self`` is converted to a normal
-        build123d ``Edge`` on the XY plane, where X is the surface U parameter and Y
-        is the surface V parameter. The original outer/inner wire structure is kept
-        so the result can be displayed with normal build123d/ocp-vscode tooling.
-
-        Args:
-            source_face: Planar or non-planar face to inspect.
-
-        Returns:
-            A planar ``Face`` in UV parameter space.
-        """
-        xy_face = BRepBuilderAPI_MakeFace(Plane.XY.wrapped).Face()
-        xy_surface = BRep_Tool.Surface_s(xy_face)
+    def _uv_face(self, plane: Plane):
+        face = BRepBuilderAPI_MakeFace(plane.wrapped).Face()
+        surface = BRep_Tool.Surface_s(face)
 
         def uv_edge(native_edge) -> Edge:
             first, last = BRep_Tool.Range_s(native_edge, self.wrapped)
             pcurve = BRep_Tool.CurveOnSurface_s(native_edge, self.wrapped, first, last)
-            edge_builder = BRepBuilderAPI_MakeEdge(pcurve, xy_surface, first, last)
+            edge_builder = BRepBuilderAPI_MakeEdge(pcurve, surface, first, last)
             if not edge_builder.IsDone():  # pragma: no cover
                 raise ValueError("Unable to convert pcurve to a planar edge")
 
@@ -1307,6 +1293,25 @@ class Face(Mixin2D[TopoDS_Face]):
         outer_wire = uv_wire(self.outer_wire())
         inner_wires = [uv_wire(wire) for wire in self.inner_wires()]
         return Face(outer_wire, inner_wires)
+
+    @property
+    def uv_face(self) -> Face:
+        """Create a planar face from a face's parametric-space boundary.
+
+        Each boundary edge's pcurve on ``self`` is converted to a normal
+        build123d ``Edge`` on the XY plane, where X is the surface U parameter and Y
+        is the surface V parameter. The original outer/inner wire structure is kept
+        so the result can be displayed with normal build123d/ocp-vscode tooling.
+
+        Args:
+            source_face: Planar or non-planar face to inspect.
+            plane: Plane to convert pcurve to, defaults to XY
+
+        Returns:
+            A planar ``Face`` in UV parameter space.
+        """
+        return self._uv_face(Plane.XY)
+
 
     @property
     def volume(self) -> float:
@@ -3073,3 +3078,18 @@ def sort_wires_by_build_order(wire_list: list[Wire]) -> list[list[Wire]]:
         )
 
     return return_value
+
+def faces_are_tangent(first: Face, second: Face, common_edge: Edge, min_dot = 1-1e-4) -> bool:
+    """Check if two surfaces are c1 continuous along a common edge"""
+    v: Vertex
+    edge_ends = [v.position for v in common_edge.vertices()]
+
+    sample_pnts = common_edge.positions(deflection=1e-2)
+    sample_pnts.extend([common_edge @ 0.1, common_edge @ 0.9])
+
+    continuous = all(
+        abs(first.normal_at(p).dot(second.normal_at(p))) > min_dot
+        for p in sample_pnts
+        if not any((p - v).length < TOLERANCE for v in edge_ends)
+    )
+    return continuous

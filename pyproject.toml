@@ -49,14 +49,13 @@ dependencies = [
     "scikit-learn >= 1.5, < 2",
     "webcolors ~= 24.8.0",
     "requests >= 2.32, < 3",
-
     # Install standard official lib3mf on everything EXCEPT linux aarch64
     "lib3mf >= 2.4.1; sys_platform != 'linux' or platform_machine != 'aarch64'",
-    
     # Install py-lib3mf ONLY on linux aarch64
     "py-lib3mf >= 2.4.1; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "bd_materials >= 0.2.0, < 0.3.0",
     "threejs-materials>=1.2.1,<1.3.0",
+    "networkx>=3.4.2",
 ]
 
 [project.urls]
@@ -131,3 +130,8 @@ show_missing = true
 [tool.diff_cover]
 fail_under = 95
 show_uncovered = true
+
+[dependency-groups]
+dev = [
+    "ocp-vscode>=4.0.1",
+]
