@@ -9,9 +9,9 @@ from ocp_vscode import show
 class UnfoldTests(unittest.TestCase):
 
     def test_build_graph(self):
-        bend = import_step("/home/johan/Dev/b123d-fork/tests/item6.step")
+        bend = import_step("/home/johan/Dev/b123d-fork/tests/item5.step")
         show(bend)
-        reF_face = bend.faces()[9]
+        reF_face = bend.faces()[5]
 
         unfold(bend, reF_face, 1.0)
 

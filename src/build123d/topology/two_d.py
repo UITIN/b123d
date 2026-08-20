@@ -84,6 +84,7 @@ from OCP.BRepIntCurveSurface import BRepIntCurveSurface_Inter
 from OCP.BRepOffsetAPI import BRepOffsetAPI_MakeFilling, BRepOffsetAPI_MakePipeShell
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol
 from OCP.BRepTools import BRepTools, BRepTools_ReShape, BRepTools_WireExplorer
+from OCP.OCP.TopoDS import TopoDS_Edge
 from OCP.gce import gce_MakeLin
 from OCP.Geom import (
     Geom_BezierSurface,
@@ -1266,24 +1267,33 @@ class Face(Mixin2D[TopoDS_Face]):
             return degrees(self.geom_adaptor().SemiAngle())  # type: ignore[attr-defined]
         return None
 
-    def _uv_face(self, plane: Plane):
+    def _uv_face(self, plane: Plane, force_ordering: bool = False) -> Face:
         face = BRepBuilderAPI_MakeFace(plane.wrapped).Face()
+        face.Orientation(self.wrapped.Orientation())
+
         surface = BRep_Tool.Surface_s(face)
 
-        def uv_edge(native_edge) -> Edge:
+
+        def uv_edge(native_edge: TopoDS_Edge) -> Edge:
             first, last = BRep_Tool.Range_s(native_edge, self.wrapped)
             pcurve = BRep_Tool.CurveOnSurface_s(native_edge, self.wrapped, first, last)
+
             edge_builder = BRepBuilderAPI_MakeEdge(pcurve, surface, first, last)
+
             if not edge_builder.IsDone():  # pragma: no cover
                 raise ValueError("Unable to convert pcurve to a planar edge")
 
             topods_edge = edge_builder.Edge()
+
             if native_edge.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
                 topods_edge = TopoDS.Edge(topods_edge.Reversed())
             return Edge(topods_edge)
 
         def uv_wire(source_wire: Wire) -> Wire:
-            wire_explorer = BRepTools_WireExplorer(source_wire.wrapped)
+            if force_ordering:
+                wire_explorer = BRepTools_WireExplorer(source_wire.wrapped, self.wrapped)
+            else:
+                wire_explorer = BRepTools_WireExplorer(source_wire.wrapped)
             uv_edges = []
             while wire_explorer.More():
                 uv_edges.append(uv_edge(TopoDS.Edge(wire_explorer.Current())))
