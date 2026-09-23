@@ -2,16 +2,15 @@ import unittest
 
 from build123d import unfold
 from build123d import import_step
-import networkx as nx
 from ocp_vscode import show
 
 
 class UnfoldTests(unittest.TestCase):
 
     def test_build_graph(self):
-        bend = import_step("/home/johan/Dev/b123d-fork/tests/item5.step")
-        show(bend)
-        reF_face = bend.faces()[5]
+        bend = import_step("/home/johan/Dev/b123d-fork/tests/hat.step")
+        reF_face = bend.faces()[82]
+        show(reF_face, bend, bend.faces())
 
         unfold(bend, reF_face, 1.0)
 

@@ -4,6 +4,15 @@ import math
 import os
 from typing import List, Tuple
 import networkx as nx
+from OCP.OCP import TopAbs
+from OCP.OCP.BRepAdaptor import BRepAdaptor_Curve2d
+from OCP.OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire, BRepBuilderAPI_MakeFace
+from OCP.OCP.BRepProj import BRepProj_Projection
+from OCP.OCP.BRepTools import BRepTools_WireExplorer, BRepTools
+from OCP.OCP.Geom import Geom_Plane
+from OCP.OCP.TopExp import TopExp_Explorer
+from OCP.OCP.TopoDS import TopoDS_Edge, TopoDS_Wire
+from OCP.TopoDS import TopoDS
 from ocp_vscode import show
 
 from build123d import scale, Curve, SortBy, CenterOf
@@ -33,14 +42,7 @@ def unbend(
     estimated_thickness: float,
     adj_graph: nx.Graph,
     seam_edges: ShapeList[Edge],
-) -> Compound:
-    # todo,
-    # return (t_r, r, t_c)
-    # t_r - translation to match the seam edges of the flanges,
-    # r - rotate flange by bend angle
-    # t_c - bend compensation using k-factor (material dependent)
-
-    # each of the
+) -> ShapeList[Edge]:
 
     def flange_face_rotation(
         lcs: Plane,
@@ -85,7 +87,7 @@ def unbend(
             bend_direction * bend_allowance,
         )
 
-    flattened_edges = ShapeList([])
+    flattened_edges = set()
     child: Face
     bend: Face
     parent: Face
@@ -96,38 +98,36 @@ def unbend(
             unbend_path[1::2],  # Elements at indices 1, 3, 5, ...
             unbend_path[2::2],  # Elements at indices 2, 4, 6, ...
         ):
-            # Your loop logic here
-            # edges_to_transform.extend(filter(lambda e: e not in seam_edges, child.edges()))
-            # edges_to_transform.extend(filter(lambda e: e not in seam_edges, bend.edges()))
-            # not_seam.extend(filter(lambda e: e not in seam_edges, parent.edges()))
 
             parent_bend_seam: Edge = adj_graph[parent][bend]["label"]
             child_bend_seam: Edge = adj_graph[bend][child]["label"]
             # Construct local coordinate system (border trihedron)
-            local_origin = parent_bend_seam.center()
-            inside_vector = parent.center() - local_origin
-            local_x = parent_bend_seam.tangent_at(0.5)
+            local_origin = parent_bend_seam.end_point()
+            local_y = parent.center() - parent_bend_seam.center()
             local_z = parent.normal_at(local_origin)
-            local_y = local_z.cross(local_x)
-
-            if local_y.dot(inside_vector) < 0:
-                local_y = -local_y
+            local_x = local_y.cross(local_z)
 
             lcs = Plane(
                 origin=local_origin,
                 x_dir=local_x,
-                y_dir=local_y,
+                z_dir=local_z,
             )
 
             signed_bend_angle: float = parent.normal_at().get_angle(child.normal_at())
             to_local = Location(lcs).inverse()
-            to_world = Location(lcs)
 
             rotation_direction = (
                 (to_local * child).normal_at().cross((to_local * parent).normal_at())
             )
+
+            if rotation_direction == Vector(0,0,0):
+                # Sometimes we identify two faces with same normal sharing a bend, not necessary to unbend these
+                flattened_edges.update(child.edges())
+                continue
+
+
             bend_angle: float = (signed_bend_angle * rotation_direction).X
-            current_flattened_edges = ShapeList([])
+            current_flattened_edges = []
             rotation: Location = flange_face_rotation(
                 lcs,
                 ShapeList([child_bend_seam]),
@@ -139,75 +139,118 @@ def unbend(
                     lcs, bend.radius, bend_angle * math.pi / 180, estimated_thickness
                 )
             )
-            show(unbend_path, lcs)
-            current_flattened_edges.extend(
-                previous * unwrap_cylinder(lcs, bend, bend_allowance_scaling)
-            )
+
+            unwrapped = previous * unwrap_cylinder(lcs, bend, bend_allowance_scaling)
+            current_flattened_edges.extend(unwrapped)
             current: Location = bend_allowance_transform * rotation
             unbent_child_edges: ShapeList[Edge] = current * child.edges()
             current_flattened_edges.extend(previous * unbent_child_edges)
             current_flattened_edges.extend(previous * parent.edges())
-            previous = current
-            flattened_edges.extend(current_flattened_edges)
-            show(bend_sequences, flattened_edges)
 
+            previous *= current
+            flattened_edges.update(current_flattened_edges)
+    return ShapeList(flattened_edges)
+
+def uv_face(face: Face, projection_plane: Plane) -> Face:
+    topods_outer_wire = BRepTools.OuterWire_s(face.wrapped)
+
+    def uv_wire(wire: TopoDS_Wire) -> Wire:
+        wire_builder = BRepBuilderAPI_MakeWire()
+        edge_explorer = TopExp_Explorer(wire, TopAbs.TopAbs_EDGE)
+
+        while edge_explorer.More():
+            current_edge: TopoDS_Edge = TopoDS.Edge(edge_explorer.Current())
+            curve_adaptor = BRepAdaptor_Curve2d(current_edge, face.wrapped)
+            first, last = curve_adaptor.FirstParameter(), curve_adaptor.LastParameter()
+            pcurve = BRep_Tool.CurveOnSurface_s(current_edge, face.wrapped, first, last)
+            # TODO: check required types of projection plane wrapped - underlying surface?
+            edge_builder = BRepBuilderAPI_MakeEdge(pcurve, Geom_Plane(projection_plane.wrapped), first, last)
+
+            if edge_builder.IsDone():
+                flatEdge: TopoDS_Edge = TopoDS.Edge(edge_builder.Edge())
+                flatEdge.Orientation(current_edge.Orientation())
+                wire_builder.Add(flatEdge)
+            edge_explorer.Next()
+
+        return Wire(wire_builder.Wire())
+
+    outer_wire = uv_wire(topods_outer_wire)
+
+    inner_wires = []
+    wire_explorer = TopExp_Explorer(face.wrapped, TopAbs.TopAbs_WIRE)
+    while wire_explorer.More():
+        current_wire: TopoDS_Wire = TopoDS.Wire(wire_explorer.Current())
+        if current_wire.IsSame(topods_outer_wire):
+            wire_explorer.Next()
+            continue
+
+        inner_wires.append(uv_wire(current_wire))
+        wire_explorer.Next()
+
+    f = Face(outer_wire, inner_wires)
+    return f
 
 def unwrap_cylinder(lcs: Plane, bend: Face, bend_allowance: float) -> ShapeList[Edge]:
     to_local = Location(lcs).inverse()
     to_world = Location(lcs)
 
+
     u_min, u_max, v_min, v_max = bend._uv_bounds()
-    uw_face: Face = bend._uv_face(lcs, True)
-    uw_face = to_world * Rot(0, 0, 90) * to_local * uw_face
 
-    show(bend, uw_face)
+    # uw_face: Face = bend._uv_face(lcs, force_ordering=True)
 
-    for a, b in zip(uw_face.edges(), bend.edges()):
-        show(lcs, bend, a, b, uw_face)
-
-    e: Edge
-
-    bend_edges = (
-        ShapeList(to_local * bend.edges())
-        .filter_by(Axis.X)
-        .filter_by(lambda e: e.geom_type != GeomType.CIRCLE)
-        .sort_by(SortBy.LENGTH)
-        .sort_by(Axis.Y)
+    uw_lcs = Plane(
+        origin=lcs.origin,
+        x_dir=lcs.x_dir,
+        z_dir=-lcs.z_dir if bend.is_circular_concave else lcs.z_dir,
     )
-    uw_edges = (
-        ShapeList(to_local * uw_face.edges())
-        .filter_by(Axis.X)
-        .filter_by(lambda e: e.geom_type != GeomType.CIRCLE)
-        .sort_by(SortBy.LENGTH)
-        .sort_by(Axis.Y)
-    )
-    try:
-        uw_edge = (
-            to_world
-            * sorted(
-                zip(bend_edges, uw_edges),
-                key=lambda e: e[0].distance_to(Vector(0, 0, 0)),
-            )[0][1]
-        )
-    except IndexError:
-        raise RuntimeError(
-            "Misidentified seams edges while unwrapping the cylinder face."
-        )
-    show(bend, uw_face, uw_edge)
 
-    # Get the closest edge and its index
-    mid_point = uw_edge.center()
-    translation = lcs.origin - mid_point
-    uw_face.label = "something"
-    uw_face = Pos(translation) * uw_face
+    #uw_face = uv_face(bend, uw_lcs)
+    uw_face = bend._uv_face(uw_lcs, force_ordering=True)
+
+    v_bend = to_local * Vertex(bend.position_at(0, 0)) - to_local * Vertex(bend.position_at(1, 0))
+    v_uv = to_local * Vertex(uw_face.position_at(0, 0)) - to_local * Vertex(uw_face.position_at(1, 0))
+    v_bend_xy = Vector(v_bend.X, v_bend.Y)
+    v_uv_xy = Vector(v_uv.X, v_uv.Y)
+    show(lcs, bend, uw_face)
+
+    angle = v_bend_xy.get_signed_angle(v_uv_xy)
+
+    show(lcs, bend, uw_face)
+
+    bend_edges = bend.edges()
+    uw_edges = uw_face.edges()
+
+    show(bend_edges, uw_edges, lcs, bend_edges[3].start_point(), uw_edges[3].start_point())
+    rot_corr = Rot(0,0,angle)
+
+    uvs = [[0,0], [0,1], [1,0], [1,1]]
+    uv_ref = sorted(
+        map(
+            lambda uv: (bend.position_at(uv[0], uv[1]), uv), uvs
+        ),
+        key=lambda pos_uv: (pos_uv[0] - lcs.origin).length
+    )
+
+    uw_face = to_world * rot_corr * to_local * uw_face
+
+    show(bend, lcs, uw_face, Vertex(uv_ref[0][0]), Vertex(uw_face.position_at(uv_ref[0][1][0], uv_ref[0][1][1])))
+
+    pos_corr = Pos(uv_ref[0][0] - uw_face.position_at(uv_ref[0][1][0], uv_ref[0][1][1]))
+
+    correction = pos_corr
+
+    uw_face: Face = correction * uw_face
+    show(lcs, bend, uw_face)
+    uw_edges = uw_face.edges()
 
     # Scale to account for projection factor and bend allowance
     allowance_factor: float = bend_allowance / (u_max - u_min)
-    unwrapped_local = to_local * uw_face
+    unwrapped_local = to_local * uw_edges
     scaled_edges = to_world * scale(
-        unwrapped_local.edges(), (1, allowance_factor, 1), about=Vector(0, 0, 0)
+        unwrapped_local, (1, allowance_factor, 1), about=Vector(0, 0, 0)
     )
-    show(lcs, bend, scaled_edges.edges())
+    show(lcs, bend, scaled_edges)
     return scaled_edges.edges()
 
 
@@ -269,21 +312,16 @@ def unfold(solid_to_unfold: Solid, reference_face: Face, material: float) -> Sol
         reference_face, dfs_tree, tangent_faces_adjacacency_graph
     )
     estimated_thickness = estimate_thickness(solid_to_unfold, reference_face)
-    unbend(
+    flattened_edges = unbend(
         bend_sequences,
         estimated_thickness,
         tangent_faces_adjacacency_graph,
         ShapeList(seam_edges),
     )
 
-    unfolded_product = None
-    bockar = None
-    final_component = Compound([unfolded_product] + bockar)
+    show(reference_face, flattened_edges, solid_to_unfold)
 
-    if final_component:
-        show(final_component)
-
-    return final_component
+    return flattened_edges
 
 
 def build_graph(solid: Solid, root_face: Face) -> nx.Graph:
@@ -417,18 +455,18 @@ def estimate_thickness(solid: Solid, ref_face: Face) -> float:
     face_normal: Vector = ref_face.normal_at(ref_face.center())
 
     # Find all faces parallel to the reference face
-    parallel_faces: ShapeList[Face] = [
+    parallel_faces: ShapeList[Face] = ShapeList([
         f
         for f in solid.faces()
         if abs(f.normal_at(f.center()).dot(face_normal)) > (1 - TOLERANCE)
-    ]
+    ])
 
     # Filter for the opposite face (anti-parallel normal)
-    opposite_faces = [
+    opposite_faces = ShapeList([
         f
         for f in parallel_faces
         if f.normal_at(f.center()).dot(face_normal) < TOLERANCE
-    ]
+    ]).sort_by_distance(ref_face)
 
     if not opposite_faces:
         raise ValueError("No opposite face found for thickness estimation.")
